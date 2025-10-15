@@ -204,9 +204,33 @@ code, kbd, samp {{
 pre {{ background: var(--code-bg); padding: 12px; border-radius: 6px; overflow: auto; }}
 pre code {{ background: transparent; border: none; padding: 0; }}
 
-table {{ width: 100%; border-collapse: collapse; }}
-table th, table td {{ border: 1px solid var(--border); padding: 6px 10px; }}
-table th {{ background: #f3f4f6; }}
+table {{ 
+  width: 100%; 
+  border-collapse: collapse; 
+  table-layout: fixed; /* Fixed layout for better width control */
+  word-wrap: break-word; /* Break long words */
+  font-size: 0.8em; /* Smaller font for tables */
+}}
+table th, table td {{ 
+  border: 1px solid var(--border); 
+  padding: 2px 4px; /* Reduced padding for better fit */
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  hyphens: auto; /* Enable hyphenation */
+  max-width: 0; /* Force equal column widths */
+}}
+table th {{ 
+  background: #f3f4f6; 
+  font-weight: bold;
+  font-size: 0.9em;
+}}
+/* For wide tables, make them even more compact */
+table[data-wide="true"] {{
+  font-size: 0.7em;
+}}
+table[data-wide="true"] th, table[data-wide="true"] td {{
+  padding: 1px 2px;
+}}
 
 hr {{ border: none; border-top: 1px solid var(--border); margin: 1.5em 0; }}
 img {{ max-width: 100%; }}
@@ -226,6 +250,10 @@ def markdown_to_html(markdown_text: str, extra_css: Optional[str] = None) -> str
     processed_markdown = process_mermaid_diagrams_in_markdown(markdown_text)
     
     body_html = MD.render(processed_markdown)
+    
+    # Post-process HTML to add data-wide attribute to tables with many columns
+    body_html = post_process_html_tables(body_html)
+    
     css = BASE_CSS + (f"\n/* user CSS overrides */\n{extra_css}" if extra_css else "")
     
     # Add Mermaid CSS and JavaScript
@@ -262,6 +290,44 @@ def markdown_to_html(markdown_text: str, extra_css: Optional[str] = None) -> str
 </body>
 </html>"""
     return html
+
+
+def post_process_html_tables(html: str) -> str:
+    """Post-process HTML to add data-wide attribute to tables with many columns"""
+    import re
+    
+    # Find all tables in the HTML
+    table_pattern = r'<table[^>]*>(.*?)</table>'
+    
+    def process_table(match):
+        table_content = match.group(0)
+        table_html = match.group(1)
+        
+        # Count the number of columns by looking at the first row
+        header_pattern = r'<tr[^>]*>(.*?)</tr>'
+        header_match = re.search(header_pattern, table_html, re.DOTALL)
+        
+        if header_match:
+            header_content = header_match.group(1)
+            # Count <th> or <td> tags
+            cell_count = len(re.findall(r'<(th|td)[^>]*>', header_content))
+            
+            # If table has more than 6 columns, add data-wide attribute
+            if cell_count > 6:
+                # Add data-wide="true" to the table tag
+                table_tag_pattern = r'<table([^>]*)>'
+                table_tag_match = re.search(table_tag_pattern, table_content)
+                if table_tag_match:
+                    attributes = table_tag_match.group(1)
+                    new_table_tag = f'<table{attributes} data-wide="true">'
+                    return new_table_tag + table_html + '</table>'
+        
+        return table_content
+    
+    # Process all tables
+    processed_html = re.sub(table_pattern, process_table, html, flags=re.DOTALL)
+    
+    return processed_html
 
 
 def process_mermaid_diagrams_in_markdown(markdown_text: str) -> str:
@@ -304,7 +370,7 @@ def process_mermaid_diagrams_in_markdown(markdown_text: str) -> str:
 
 
 def parse_markdown_table(table_lines):
-    """Parse markdown table lines into a ReportLab Table"""
+    """Parse markdown table lines into a ReportLab Table with proper width constraints"""
     if not table_lines:
         return None
     
@@ -328,45 +394,114 @@ def parse_markdown_table(table_lines):
     if len(rows) < 2:  # Need at least header and one data row
         return None
     
-    # Create table data
+    # Calculate available width (A4 page width minus margins)
+    page_width = A4[0]  # A4 width in points
+    left_margin = 72
+    right_margin = 72
+    available_width = page_width - left_margin - right_margin
+    
+    # Process table data and wrap long text
     table_data = []
     for row in rows:
         processed_row = []
         for cell in row:
             # Process bold text in cells
             processed_cell = process_bold_text(cell)
+            # Wrap long text to prevent overflow
+            processed_cell = wrap_text_for_table(processed_cell, max_length=50)
             processed_row.append(processed_cell)
         table_data.append(processed_row)
     
-    # Create ReportLab Table
-    table = Table(table_data)
+    # Calculate column widths based on content
+    num_cols = len(table_data[0]) if table_data else 1
     
-    # Style the table
+    # For tables with many columns, use smaller widths
+    if num_cols > 6:
+        # For wide tables, use smaller font and tighter spacing
+        col_width = available_width / num_cols
+        font_size_header = 7
+        font_size_data = 6
+        padding = 2
+    else:
+        # For normal tables, use proportional widths
+        col_width = available_width / num_cols
+        font_size_header = 8
+        font_size_data = 7
+        padding = 3
+    
+    # Set column widths to ensure table fits
+    col_widths = [col_width] * num_cols
+    
+    # Create ReportLab Table with explicit column widths
+    table = Table(table_data, colWidths=col_widths)
+    
+    # Style the table with appropriate font sizes
     table_style = TableStyle([
         # Header row styling
         ('BACKGROUND', (0, 0), (-1, 0), lightgrey),
         ('TEXTCOLOR', (0, 0), (-1, 0), black),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('FONTSIZE', (0, 0), (-1, 0), font_size_header),
         
         # Data rows styling
         ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 9),
+        ('FONTSIZE', (0, 1), (-1, -1), font_size_data),
         
         # Borders
-        ('GRID', (0, 0), (-1, -1), 1, black),
+        ('GRID', (0, 0), (-1, -1), 0.5, black),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         
-        # Padding
-        ('LEFTPADDING', (0, 0), (-1, -1), 6),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-        ('TOPPADDING', (0, 0), (-1, -1), 4),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        # Padding - reduced for better fit
+        ('LEFTPADDING', (0, 0), (-1, -1), padding),
+        ('RIGHTPADDING', (0, 0), (-1, -1), padding),
+        ('TOPPADDING', (0, 0), (-1, -1), padding),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), padding),
+        
+        # Word wrapping for long text
+        ('WORDWRAP', (0, 0), (-1, -1), 'CJK'),
     ])
     
     table.setStyle(table_style)
+    
     return table
+
+
+def wrap_text_for_table(text: str, max_length: int = 50) -> str:
+    """Wrap long text in table cells to prevent overflow"""
+    if len(text) <= max_length:
+        return text
+    
+    # Split text into words
+    words = text.split()
+    if not words:
+        return text
+    
+    lines = []
+    current_line = ""
+    
+    for word in words:
+        # If adding this word would exceed max_length, start a new line
+        if len(current_line) + len(word) + 1 > max_length:
+            if current_line:
+                lines.append(current_line.strip())
+                current_line = word
+            else:
+                # Single word is too long, truncate it
+                lines.append(word[:max_length-3] + "...")
+                current_line = ""
+        else:
+            if current_line:
+                current_line += " " + word
+            else:
+                current_line = word
+    
+    # Add the last line
+    if current_line:
+        lines.append(current_line.strip())
+    
+    # Join lines with line breaks
+    return "<br/>".join(lines)
 
 
 def process_bold_text(text: str) -> str:
@@ -505,13 +640,8 @@ class NumberedCanvas(canvas.Canvas):
                 # Fallback to A4 size
                 page_width, page_height = A4
             
-            # Header - Document title at top center
-            self.setFont("Helvetica-Bold", 12)
-            self.setFillColor(black)
-            title_width = self.stringWidth(document_title, "Helvetica-Bold", 12)
-            self.drawString((page_width - title_width) / 2, page_height - 25, document_title)
-            
-            # Add a subtle line under the header
+            # Header - Leave blank as requested (no document title)
+            # Just add a subtle line for visual separation
             self.setStrokeColor(grey)
             self.setLineWidth(0.5)
             self.line(72, page_height - 30, page_width - 72, page_height - 30)
