@@ -1,0 +1,30 @@
+# Core FastAPI dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+python-multipart>=0.0.6
+
+# PDF generation
+reportlab>=4.0.0
+weasyprint>=60.0  # Optional but recommended for better PDF rendering
+
+# DOCX generation
+pypandoc>=1.11
+python-docx>=0.8.11
+html2docx>=0.0.6
+
+# Markdown processing
+markdown-it-py>=3.0.0
+mdit-py-plugins>=0.4.0
+
+# Syntax highlighting
+pygments>=2.15.0
+
+# Image processing (for Mermaid diagrams)
+pillow>=10.0.0
+
+# HTTP requests (for Mermaid online API fallback)
+requests>=2.31.0
+
+# Additional utilities
+python-dotenv>=1.0.0
