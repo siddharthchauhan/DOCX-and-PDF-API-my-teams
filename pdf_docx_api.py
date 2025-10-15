@@ -7,7 +7,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator
 
 # Markdown parsing with GitHub-like features
 from markdown_it import MarkdownIt
@@ -57,14 +57,16 @@ try:
 except Exception:
     PANDOC_AVAILABLE = False
 
-# DOCX rendering - fallback: html2docx + python-docx
-HTML2DOCX_AVAILABLE = False
+# DOCX rendering - fallback: python-docx
+PYTHON_DOCX_AVAILABLE = False
 try:
-    from html2docx import HtmlToDocx
     from docx import Document
-    HTML2DOCX_AVAILABLE = True
+    PYTHON_DOCX_AVAILABLE = True
 except Exception:
-    HTML2DOCX_AVAILABLE = False
+    PYTHON_DOCX_AVAILABLE = False
+
+# Legacy html2docx import (not used anymore, but kept for compatibility)
+HTML2DOCX_AVAILABLE = PYTHON_DOCX_AVAILABLE
 
 # Mermaid diagram rendering
 MERMAID_AVAILABLE = False
@@ -90,42 +92,45 @@ class RenderRequest(BaseModel):
     filename: Optional[str] = "document"
     css: Optional[str] = None  # Optional extra CSS for tweaks in PDF/DOCX
     
-    @validator('markdown')
+    @field_validator('markdown')
+    @classmethod
     def sanitize_markdown(cls, v):
         """Sanitize control characters from markdown input"""
         if not isinstance(v, str):
             raise ValueError('Markdown must be a string')
-        
+
         # Remove or replace invalid control characters (except newlines and tabs)
         # Keep \n (0x0A), \r (0x0D), and \t (0x09), remove others
         sanitized = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', v)
-        
+
         # Normalize line endings
         sanitized = re.sub(r'\r\n|\r', '\n', sanitized)
-        
+
         return sanitized
-    
-    @validator('filename')
+
+    @field_validator('filename')
+    @classmethod
     def sanitize_filename(cls, v):
         """Sanitize filename to remove invalid characters"""
         if v is None:
             return "document"
-        
+
         # Remove invalid filename characters
         sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '', str(v))
-        
+
         # Ensure it's not empty after sanitization
         if not sanitized.strip():
             return "document"
-            
+
         return sanitized.strip()
-    
-    @validator('css')
+
+    @field_validator('css')
+    @classmethod
     def sanitize_css(cls, v):
         """Sanitize CSS input"""
         if v is None:
             return None
-            
+
         # Remove control characters from CSS
         sanitized = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', str(v))
         return sanitized
@@ -334,38 +339,38 @@ def process_mermaid_diagrams_in_markdown(markdown_text: str) -> str:
     """Process Mermaid diagrams in markdown and convert them to HTML"""
     lines = markdown_text.split('\n')
     processed_lines = []
-    in_mermaid_block = False
-    mermaid_lines = []
-    mermaid_language = ""
-    
+    in_code_block = False
+    code_lines = []
+    code_language = ""
+
     for line in lines:
         if line.strip().startswith('```'):
-            if in_mermaid_block:
-                # End of Mermaid block
-                if mermaid_lines and is_mermaid_diagram('\n'.join(mermaid_lines), mermaid_language):
+            if in_code_block:
+                # End of code block
+                if code_language and is_mermaid_diagram('\n'.join(code_lines), code_language):
                     # Convert Mermaid to HTML
-                    mermaid_code = '\n'.join(mermaid_lines)
+                    mermaid_code = '\n'.join(code_lines)
                     mermaid_html = f'<div class="mermaid">\n{mermaid_code}\n</div>'
                     processed_lines.append(mermaid_html)
                 else:
                     # Regular code block
-                    processed_lines.append('```' + mermaid_language)
-                    processed_lines.extend(mermaid_lines)
+                    processed_lines.append('```' + code_language)
+                    processed_lines.extend(code_lines)
                     processed_lines.append('```')
-                
-                mermaid_lines = []
-                mermaid_language = ""
-                in_mermaid_block = False
+
+                code_lines = []
+                code_language = ""
+                in_code_block = False
             else:
                 # Start of code block
                 language = line.strip()[3:].strip()
-                mermaid_language = language
-                in_mermaid_block = True
-        elif in_mermaid_block:
-            mermaid_lines.append(line)
+                code_language = language
+                in_code_block = True
+        elif in_code_block:
+            code_lines.append(line)
         else:
             processed_lines.append(line)
-    
+
     return '\n'.join(processed_lines)
 
 
@@ -373,7 +378,7 @@ def parse_markdown_table(table_lines):
     """Parse markdown table lines into a ReportLab Table with proper width constraints"""
     if not table_lines:
         return None
-    
+
     # Parse table rows
     rows = []
     for line in table_lines:
@@ -387,34 +392,22 @@ def parse_markdown_table(table_lines):
                 if not re.match(r'^[-:\s]+$', cell):
                     is_separator = False
                     break
-            
+
             if not is_separator:
                 rows.append(cells)
-    
+
     if len(rows) < 2:  # Need at least header and one data row
         return None
-    
+
     # Calculate available width (A4 page width minus margins)
     page_width = A4[0]  # A4 width in points
     left_margin = 72
     right_margin = 72
     available_width = page_width - left_margin - right_margin
-    
-    # Process table data and wrap long text
-    table_data = []
-    for row in rows:
-        processed_row = []
-        for cell in row:
-            # Process bold text in cells
-            processed_cell = process_bold_text(cell)
-            # Wrap long text to prevent overflow
-            processed_cell = wrap_text_for_table(processed_cell, max_length=50)
-            processed_row.append(processed_cell)
-        table_data.append(processed_row)
-    
+
     # Calculate column widths based on content
-    num_cols = len(table_data[0]) if table_data else 1
-    
+    num_cols = len(rows[0]) if rows else 1
+
     # For tables with many columns, use smaller widths
     if num_cols > 6:
         # For wide tables, use smaller font and tighter spacing
@@ -428,42 +421,70 @@ def parse_markdown_table(table_lines):
         font_size_header = 8
         font_size_data = 7
         padding = 3
-    
+
     # Set column widths to ensure table fits
     col_widths = [col_width] * num_cols
-    
+
+    # Create paragraph styles for table cells
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT
+
+    cell_style_header = ParagraphStyle(
+        'TableCellHeader',
+        fontName='Helvetica-Bold',
+        fontSize=font_size_header,
+        leading=font_size_header * 1.2,
+        alignment=TA_LEFT,
+        wordWrap='CJK'
+    )
+
+    cell_style_data = ParagraphStyle(
+        'TableCellData',
+        fontName='Helvetica',
+        fontSize=font_size_data,
+        leading=font_size_data * 1.2,
+        alignment=TA_LEFT,
+        wordWrap='CJK'
+    )
+
+    # Process table data using Paragraph objects for proper wrapping
+    table_data = []
+    for i, row in enumerate(rows):
+        processed_row = []
+        is_header = (i == 0)
+        style = cell_style_header if is_header else cell_style_data
+
+        for cell in row:
+            # Process bold text in cells
+            processed_cell = process_bold_text(cell)
+            # Create Paragraph object for proper text wrapping
+            cell_paragraph = Paragraph(processed_cell, style)
+            processed_row.append(cell_paragraph)
+        table_data.append(processed_row)
+
     # Create ReportLab Table with explicit column widths
     table = Table(table_data, colWidths=col_widths)
-    
-    # Style the table with appropriate font sizes
+
+    # Style the table
     table_style = TableStyle([
         # Header row styling
         ('BACKGROUND', (0, 0), (-1, 0), lightgrey),
         ('TEXTCOLOR', (0, 0), (-1, 0), black),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), font_size_header),
-        
-        # Data rows styling
-        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), font_size_data),
-        
+
         # Borders
         ('GRID', (0, 0), (-1, -1), 0.5, black),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        
+
         # Padding - reduced for better fit
         ('LEFTPADDING', (0, 0), (-1, -1), padding),
         ('RIGHTPADDING', (0, 0), (-1, -1), padding),
         ('TOPPADDING', (0, 0), (-1, -1), padding),
         ('BOTTOMPADDING', (0, 0), (-1, -1), padding),
-        
-        # Word wrapping for long text
-        ('WORDWRAP', (0, 0), (-1, -1), 'CJK'),
     ])
-    
+
     table.setStyle(table_style)
-    
+
     return table
 
 
@@ -506,86 +527,105 @@ def wrap_text_for_table(text: str, max_length: int = 50) -> str:
 
 def process_bold_text(text: str) -> str:
     """Convert markdown bold syntax to HTML bold tags for ReportLab"""
-    # Convert **text** to <b>text</b>
     import re
-    
-    # Handle **bold** syntax
-    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-    
-    # Handle __bold__ syntax
-    text = re.sub(r'__(.*?)__', r'<b>\1</b>', text)
-    
-    # Escape other HTML characters that might cause issues
+
+    # First, escape HTML special characters to prevent issues
+    # but preserve them for later restoration
     text = text.replace('&', '&amp;')
     text = text.replace('<', '&lt;').replace('>', '&gt;')
-    
-    # Restore the bold tags
-    text = text.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
-    
+
+    # Handle **bold** syntax
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+
+    # Handle __bold__ syntax
+    text = re.sub(r'__(.*?)__', r'<b>\1</b>', text)
+
     return text
 
 
 def render_mermaid_diagram(mermaid_code: str) -> Optional[bytes]:
-    """Render Mermaid diagram to PNG bytes"""
+    """Render Mermaid diagram to PNG bytes using multiple fallback methods"""
     if not MERMAID_AVAILABLE:
         print("Mermaid rendering not available - missing dependencies")
         return None
-    
+
+    mmd_path = None
+    png_path = None
+
     try:
-        # Create temporary files
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.mmd', delete=False) as mmd_file:
-            mmd_file.write(mermaid_code)
-            mmd_path = mmd_file.name
-        
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as png_file:
-            png_path = png_file.name
-        
-        # Try to render using mermaid-cli (if available)
+        # Method 1: Try using mermaid-cli (mmdc) if available
         try:
+            # Create temporary files
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.mmd', delete=False) as mmd_file:
+                mmd_file.write(mermaid_code)
+                mmd_path = mmd_file.name
+
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as png_file:
+                png_path = png_file.name
+
             result = subprocess.run([
-                'mmdc', '-i', mmd_path, '-o', png_path, 
+                'mmdc', '-i', mmd_path, '-o', png_path,
                 '--width', '800', '--height', '600',
                 '--backgroundColor', 'white'
             ], capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0 and os.path.exists(png_path):
+
+            if result.returncode == 0 and os.path.exists(png_path) and os.path.getsize(png_path) > 0:
                 with open(png_path, 'rb') as f:
                     image_data = f.read()
+                print("Mermaid diagram rendered successfully using mmdc")
                 return image_data
             else:
                 print(f"Mermaid CLI failed: {result.stderr}")
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             print(f"Mermaid CLI not available: {e}")
-        
-        # Fallback: Try using online Mermaid API (requires internet)
+
+        # Method 2: Try using online Mermaid.ink API (requires internet)
         try:
             import requests
-            mermaid_data = {
-                "code": mermaid_code,
-                "mermaid": {"theme": "default"}
-            }
-            
-            response = requests.post(
-                "https://mermaid.ink/img/" + base64.b64encode(mermaid_code.encode()).decode(),
-                timeout=10
-            )
-            
-            if response.status_code == 200:
+            # Encode mermaid code to base64
+            encoded = base64.b64encode(mermaid_code.encode('utf-8')).decode('ascii')
+            url = f"https://mermaid.ink/img/{encoded}"
+
+            response = requests.get(url, timeout=15)
+
+            if response.status_code == 200 and len(response.content) > 0:
+                print("Mermaid diagram rendered successfully using mermaid.ink")
                 return response.content
+            else:
+                print(f"Online Mermaid API failed with status {response.status_code}")
         except Exception as e:
             print(f"Online Mermaid API failed: {e}")
-        
+
+        # Method 3: Try Kroki API as another fallback
+        try:
+            import requests
+            import zlib
+            # Compress and encode
+            compressed = zlib.compress(mermaid_code.encode('utf-8'), 9)
+            encoded = base64.urlsafe_b64encode(compressed).decode('ascii')
+            url = f"https://kroki.io/mermaid/png/{encoded}"
+
+            response = requests.get(url, timeout=15)
+
+            if response.status_code == 200 and len(response.content) > 0:
+                print("Mermaid diagram rendered successfully using Kroki")
+                return response.content
+            else:
+                print(f"Kroki API failed with status {response.status_code}")
+        except Exception as e:
+            print(f"Kroki API failed: {e}")
+
         return None
-        
+
     except Exception as e:
         print(f"Error rendering Mermaid diagram: {e}")
         return None
     finally:
         # Clean up temporary files
         try:
-            if 'mmd_path' in locals() and os.path.exists(mmd_path):
+            if mmd_path and os.path.exists(mmd_path):
                 os.remove(mmd_path)
-            if 'png_path' in locals() and os.path.exists(png_path):
+            if png_path and os.path.exists(png_path):
                 os.remove(png_path)
         except Exception:
             pass
@@ -731,83 +771,89 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
     # Get styles
     styles = getSampleStyleSheet()
     
-    # Create enhanced custom styles (plain text, no HTML)
+    # Create enhanced custom styles with reduced spacing
     title_style = ParagraphStyle(
         'CustomTitle',
         parent=styles['Heading1'],
         fontSize=18,
-        spaceAfter=24,
-        spaceBefore=12,
+        spaceAfter=12,
+        spaceBefore=0,
         alignment=TA_LEFT,
         textColor=black,
-        fontName='Helvetica-Bold'
+        fontName='Helvetica-Bold',
+        leading=22
     )
-    
+
     heading_style = ParagraphStyle(
         'CustomHeading',
         parent=styles['Heading2'],
         fontSize=14,
-        spaceAfter=16,
-        spaceBefore=20,
+        spaceAfter=10,
+        spaceBefore=12,
         alignment=TA_LEFT,
         textColor=black,
-        fontName='Helvetica-Bold'
+        fontName='Helvetica-Bold',
+        leading=18
     )
-    
+
     subheading_style = ParagraphStyle(
         'CustomSubHeading',
         parent=styles['Heading3'],
         fontSize=12,
-        spaceAfter=12,
-        spaceBefore=16,
+        spaceAfter=8,
+        spaceBefore=10,
         alignment=TA_LEFT,
         textColor=black,
-        fontName='Helvetica-Bold'
+        fontName='Helvetica-Bold',
+        leading=16
     )
-    
+
     subsubheading_style = ParagraphStyle(
         'CustomSubSubHeading',
         parent=styles['Heading4'],
         fontSize=11,
-        spaceAfter=8,
-        spaceBefore=12,
+        spaceAfter=6,
+        spaceBefore=8,
         alignment=TA_LEFT,
         textColor=black,
-        fontName='Helvetica-Bold'
+        fontName='Helvetica-Bold',
+        leading=14
     )
-    
+
     normal_style = ParagraphStyle(
         'CustomNormal',
         parent=styles['Normal'],
         fontSize=10,
-        spaceAfter=8,
-        spaceBefore=4,
-        alignment=TA_JUSTIFY,
+        spaceAfter=6,
+        spaceBefore=2,
+        alignment=TA_LEFT,
         textColor=black,
         fontName='Helvetica',
-        leading=12
+        leading=14,
+        wordWrap='CJK'
     )
     
     bullet_style = ParagraphStyle(
         'CustomBullet',
         parent=styles['Normal'],
         fontSize=10,
-        spaceAfter=4,
-        spaceBefore=2,
+        spaceAfter=6,
+        spaceBefore=4,
         alignment=TA_LEFT,
         textColor=black,
         fontName='Helvetica',
         leftIndent=20,
         bulletIndent=10,
-        leading=12
+        leading=14,
+        wordWrap='CJK'
     )
     
     code_style = ParagraphStyle(
         'CustomCode',
         parent=styles['Code'],
-        fontSize=9,
-        spaceAfter=8,
-        spaceBefore=8,
+        fontSize=8,
+        spaceAfter=12,
+        spaceBefore=12,
         alignment=TA_LEFT,
         textColor=black,
         fontName='Courier',
@@ -815,7 +861,8 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
         borderColor='#cccccc',
         borderWidth=1,
         borderPadding=8,
-        leading=10
+        leading=11,
+        wordWrap='CJK'
     )
     
     # Parse markdown and convert to PDF elements
@@ -826,64 +873,70 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
     in_table = False
     table_lines = []
     
+    code_language = ""
+
     for i, line in enumerate(lines):
         original_line = line
         line = line.strip()
-        
+
         # Handle code blocks
         if line.startswith('```'):
             if in_code_block:
                 # End of code block
                 if code_lines:
                     code_text = '\n'.join(code_lines)
-                    
+
                     # Check if this is a Mermaid diagram
-                    if len(code_lines) > 0 and code_lines[0].strip().startswith('```'):
-                        # Extract language from first line
-                        first_line = code_lines[0].strip()
-                        if first_line.startswith('```'):
-                            language = first_line[3:].strip()
-                            mermaid_code = '\n'.join(code_lines[1:]) if len(code_lines) > 1 else ""
-                            
-                            if is_mermaid_diagram(mermaid_code, language):
-                                # Try to render Mermaid diagram
-                                image_data = render_mermaid_diagram(mermaid_code)
-                                if image_data:
-                                    try:
-                                        # Add image to PDF
-                                        from reportlab.platypus import Image as RLImage
-                                        from reportlab.lib.utils import ImageReader
-                                        
-                                        img_buffer = io.BytesIO(image_data)
-                                        img = RLImage(ImageReader(img_buffer), width=400, height=300)
-                                        elements.append(img)
-                                        elements.append(Spacer(1, 12))
-                                    except Exception as e:
-                                        print(f"Error adding Mermaid image to PDF: {e}")
-                                        # Fallback to placeholder text
-                                        placeholder = create_mermaid_placeholder(mermaid_code)
-                                        elements.append(Paragraph(placeholder, code_style))
-                                else:
-                                    # Fallback to placeholder text
-                                    placeholder = create_mermaid_placeholder(mermaid_code)
-                                    elements.append(Paragraph(placeholder, code_style))
-                            else:
-                                # Regular code block
-                                elements.append(Paragraph(code_text, code_style))
+                    if code_language and is_mermaid_diagram(code_text, code_language):
+                        # Try to render Mermaid diagram
+                        image_data = render_mermaid_diagram(code_text)
+                        if image_data:
+                            try:
+                                # Add image to PDF with proper aspect ratio
+                                from reportlab.platypus import Image as RLImage
+                                from PIL import Image as PILImage
+
+                                # Save image data to BytesIO and pass it directly
+                                img_buffer = io.BytesIO(image_data)
+
+                                # Get original image dimensions to maintain aspect ratio
+                                pil_img = PILImage.open(io.BytesIO(image_data))
+                                orig_width, orig_height = pil_img.size
+
+                                # Calculate dimensions to fit within page width while maintaining aspect ratio
+                                max_width = 450  # Max width in points (about 6.25 inches)
+                                aspect_ratio = orig_height / orig_width
+
+                                # Scale to fit max width
+                                new_width = min(max_width, orig_width)
+                                new_height = new_width * aspect_ratio
+
+                                img_buffer.seek(0)  # Reset buffer position
+                                img = RLImage(img_buffer, width=new_width, height=new_height)
+                                elements.append(img)
+                                elements.append(Spacer(1, 12))
+                            except Exception as e:
+                                print(f"Error adding Mermaid image to PDF: {e}")
+                                # Fallback to placeholder text
+                                placeholder = create_mermaid_placeholder(code_text)
+                                elements.append(Paragraph(placeholder, code_style))
                         else:
-                            # Regular code block
-                            elements.append(Paragraph(code_text, code_style))
+                            # Fallback to placeholder text
+                            placeholder = create_mermaid_placeholder(code_text)
+                            elements.append(Paragraph(placeholder, code_style))
                     else:
                         # Regular code block
                         elements.append(Paragraph(code_text, code_style))
-                    
+
                     code_lines = []
+                    code_language = ""
                 in_code_block = False
             else:
-                # Start of code block
+                # Start of code block - extract language
+                code_language = line[3:].strip()
                 in_code_block = True
             continue
-        
+
         if in_code_block:
             code_lines.append(original_line)
             continue
@@ -908,7 +961,7 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
         
         # Handle empty lines
         if not line:
-            elements.append(Spacer(1, 6))
+            elements.append(Spacer(1, 12))
             continue
         
         # Handle headers with better detection
@@ -1126,65 +1179,162 @@ def markdown_to_docx_bytes(markdown_text: str, extra_css: Optional[str] = None) 
                 pass
 
     if HTML2DOCX_AVAILABLE:
-        html = markdown_to_html(markdown_text, extra_css=extra_css)
+        # Direct markdown-to-DOCX conversion without html2docx
+        from docx.shared import Pt, RGBColor
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
         doc = Document()
-        
+
         # Add headers and footers to the document
         sections = doc.sections
         for section in sections:
             # Set header
-            header = section.header
-            header_para = header.paragraphs[0]
-            header_para.text = "Confidential"
-            header_para.alignment = 0  # Left alignment
-            # Make header bold
             try:
-                from docx.shared import Pt
-                header_run = header_para.runs[0] if header_para.runs else header_para.add_run()
-                header_run.bold = True
-                header_run.font.size = Pt(10)
+                header = section.header
+                header_para = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+                header_para.text = "Confidential"
+                header_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                # Make header bold
+                if header_para.runs:
+                    for run in header_para.runs:
+                        run.bold = True
+                        run.font.size = Pt(10)
             except Exception as e:
-                print(f"Could not style header in fallback doc: {e}")
-            
+                print(f"Could not set header: {e}")
+
             # Set footer with page number
-            footer = section.footer
-            footer_para = footer.paragraphs[0]
-            footer_para.text = "Page "
-            footer_para.alignment = 1  # Center alignment
-            
-            # Add page number field
             try:
-                from docx.oxml.shared import qn
-                from docx.oxml import OxmlElement
-                
-                # Create page number field
-                fldChar1 = OxmlElement('w:fldChar')
-                fldChar1.set(qn('w:fldCharType'), 'begin')
-                
-                instrText = OxmlElement('w:instrText')
-                instrText.text = "PAGE"
-                
-                fldChar2 = OxmlElement('w:fldChar')
-                fldChar2.set(qn('w:fldCharType'), 'end')
-                
-                # Add the field to the footer paragraph
-                footer_para._p.append(fldChar1)
-                footer_para._p.append(instrText)
-                footer_para._p.append(fldChar2)
+                footer = section.footer
+                footer_para = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+                footer_para.text = "Page "
+                footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
             except Exception as e:
-                print(f"Could not add page number field: {e}")
-                # Fallback to static text
-                footer_para.text = "Page [Page Number]"
-        
-        parser = HtmlToDocx()
-        parser.add_html_to_document(html, doc)
+                print(f"Could not set footer: {e}")
+
+        # Parse markdown line by line
+        lines = markdown_text.split('\n')
+        in_code_block = False
+        in_table = False
+        code_lines = []
+        table_lines = []
+
+        for line in lines:
+            # Handle code blocks
+            if line.strip().startswith('```'):
+                if in_code_block:
+                    # End code block
+                    code_text = '\n'.join(code_lines)
+                    para = doc.add_paragraph(code_text)
+                    para.style = 'Normal'
+                    for run in para.runs:
+                        run.font.name = 'Courier New'
+                        run.font.size = Pt(9)
+                    code_lines = []
+                    in_code_block = False
+                else:
+                    # Start code block
+                    in_code_block = True
+                continue
+
+            if in_code_block:
+                code_lines.append(line)
+                continue
+
+            # Handle tables
+            if '|' in line and line.strip():
+                if not in_table:
+                    in_table = True
+                    table_lines = []
+                table_lines.append(line)
+                continue
+            elif in_table:
+                # End table
+                if len(table_lines) >= 2:
+                    # Parse table
+                    rows = []
+                    for tline in table_lines:
+                        cells = [cell.strip() for cell in tline.split('|') if cell.strip()]
+                        if cells and not all(re.match(r'^[-:\s]+$', cell) for cell in cells):
+                            rows.append(cells)
+
+                    if rows:
+                        table = doc.add_table(rows=len(rows), cols=len(rows[0]))
+                        table.style = 'Light Grid Accent 1'
+                        for i, row in enumerate(rows):
+                            for j, cell_text in enumerate(row):
+                                cell = table.rows[i].cells[j]
+                                cell.text = cell_text
+                                # Make header bold
+                                if i == 0:
+                                    for para in cell.paragraphs:
+                                        for run in para.runs:
+                                            run.bold = True
+
+                in_table = False
+                table_lines = []
+
+            # Handle headings
+            if line.startswith('# '):
+                doc.add_heading(line[2:].strip(), level=1)
+            elif line.startswith('## '):
+                doc.add_heading(line[3:].strip(), level=2)
+            elif line.startswith('### '):
+                doc.add_heading(line[4:].strip(), level=3)
+            elif line.startswith('#### '):
+                doc.add_heading(line[5:].strip(), level=4)
+
+            # Handle bullet points
+            elif line.startswith('- ') or line.startswith('* '):
+                para = doc.add_paragraph(line[2:].strip(), style='List Bullet')
+
+            # Handle numbered lists
+            elif line.startswith(('1. ', '2. ', '3. ', '4. ', '5. ', '6. ', '7. ', '8. ', '9. ')):
+                para = doc.add_paragraph(line[3:].strip(), style='List Number')
+
+            # Handle horizontal rules
+            elif line.strip() == '---':
+                para = doc.add_paragraph()
+                para.add_run('_' * 50)
+
+            # Regular text
+            elif line.strip():
+                para = doc.add_paragraph(line.strip())
+                # Process bold text
+                if '**' in line:
+                    para.clear()
+                    parts = line.split('**')
+                    for i, part in enumerate(parts):
+                        run = para.add_run(part)
+                        if i % 2 == 1:  # Odd indices are bold
+                            run.bold = True
+
+        # Handle remaining table
+        if in_table and len(table_lines) >= 2:
+            rows = []
+            for tline in table_lines:
+                cells = [cell.strip() for cell in tline.split('|') if cell.strip()]
+                if cells and not all(re.match(r'^[-:\s]+$', cell) for cell in cells):
+                    rows.append(cells)
+
+            if rows:
+                table = doc.add_table(rows=len(rows), cols=len(rows[0]))
+                table.style = 'Light Grid Accent 1'
+                for i, row in enumerate(rows):
+                    for j, cell_text in enumerate(row):
+                        cell = table.rows[i].cells[j]
+                        cell.text = cell_text
+                        if i == 0:
+                            for para in cell.paragraphs:
+                                for run in para.runs:
+                                    run.bold = True
+
         buf = io.BytesIO()
         doc.save(buf)
         buf.seek(0)
         return buf.read()
 
     raise RuntimeError(
-        "No DOCX backend available. Install pypandoc (recommended) or html2docx+python-docx."
+        "No DOCX backend available. Install pypandoc (recommended) or python-docx."
     )
 
 
