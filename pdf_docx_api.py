@@ -1320,31 +1320,42 @@ def _create_reference_docx() -> str:
             # Set footer with page number
             footer = section.footer
             footer_para = footer.paragraphs[0]
-            footer_para.text = "Page "
             footer_para.alignment = 1  # Center alignment
-            
+
             # Add page number field
             try:
                 from docx.oxml.shared import qn
                 from docx.oxml import OxmlElement
-                
-                # Create page number field
+
+                # Clear any existing content
+                footer_para.clear()
+
+                # Add "Page " text as a run
+                footer_para.add_run("Page ")
+
+                # Create a new run for the page number field
+                run_element = OxmlElement('w:r')
+
+                # Create page number field within the run
                 fldChar1 = OxmlElement('w:fldChar')
                 fldChar1.set(qn('w:fldCharType'), 'begin')
-                
+                run_element.append(fldChar1)
+
                 instrText = OxmlElement('w:instrText')
+                instrText.set(qn('xml:space'), 'preserve')
                 instrText.text = "PAGE"
-                
+                run_element.append(instrText)
+
                 fldChar2 = OxmlElement('w:fldChar')
                 fldChar2.set(qn('w:fldCharType'), 'end')
-                
-                # Add the field to the footer paragraph
-                footer_para._p.append(fldChar1)
-                footer_para._p.append(instrText)
-                footer_para._p.append(fldChar2)
+                run_element.append(fldChar2)
+
+                # Add the field run to the footer paragraph
+                footer_para._p.append(run_element)
             except Exception as e:
                 print(f"Could not add page number field to reference doc: {e}")
                 # Fallback to static text
+                footer_para.clear()
                 footer_para.text = "Page [Page Number]"
         
         # Save the reference document
@@ -1453,29 +1464,40 @@ def markdown_to_docx_bytes(markdown_text: str, extra_css: Optional[str] = None) 
         footer = section.footer
         footer_para = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
         footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
+
         # Add page number field
         try:
             from datetime import datetime
             current_date = datetime.now().strftime("%d-%b-%Y")
-            
-            # Add date
+
+            # Clear any existing content
+            footer_para.clear()
+
+            # Add date and "Page " text as a run
             run = footer_para.add_run(f"{current_date} | Page ")
-            
-            # Add page number field
+
+            # Create a new run for the page number field
+            run_element = OxmlElement('w:r')
+
+            # Add page number field within the run
             fldChar1 = OxmlElement('w:fldChar')
             fldChar1.set(qn('w:fldCharType'), 'begin')
-            footer_para._p.append(fldChar1)
-            
+            run_element.append(fldChar1)
+
             instrText = OxmlElement('w:instrText')
+            instrText.set(qn('xml:space'), 'preserve')
             instrText.text = "PAGE"
-            footer_para._p.append(instrText)
-            
+            run_element.append(instrText)
+
             fldChar2 = OxmlElement('w:fldChar')
             fldChar2.set(qn('w:fldCharType'), 'end')
-            footer_para._p.append(fldChar2)
+            run_element.append(fldChar2)
+
+            # Append the run with the field to the paragraph
+            footer_para._p.append(run_element)
         except Exception as e:
             print(f"Could not add page numbers: {e}")
+            footer_para.clear()
             footer_para.text = "Confidential"
 
         # Parse markdown with proper formatting
@@ -1512,19 +1534,37 @@ def markdown_to_docx_bytes(markdown_text: str, extra_css: Optional[str] = None) 
                 in_table = False
                 table_lines = []
             
-            # Handle headings
+            # Handle headings - use explicit black color
             if stripped.startswith('# '):
-                doc.add_heading(stripped[2:], level=1)
+                heading = doc.add_heading(stripped[2:], level=1)
+                for run in heading.runs:
+                    from docx.shared import RGBColor
+                    run.font.color.rgb = RGBColor(0, 0, 0)  # Explicit black
             elif stripped.startswith('## '):
-                doc.add_heading(stripped[3:], level=2)
+                heading = doc.add_heading(stripped[3:], level=2)
+                for run in heading.runs:
+                    from docx.shared import RGBColor
+                    run.font.color.rgb = RGBColor(0, 0, 0)  # Explicit black
             elif stripped.startswith('### '):
-                doc.add_heading(stripped[4:], level=3)
+                heading = doc.add_heading(stripped[4:], level=3)
+                for run in heading.runs:
+                    from docx.shared import RGBColor
+                    run.font.color.rgb = RGBColor(0, 0, 0)  # Explicit black
             elif stripped.startswith('#### '):
-                doc.add_heading(stripped[5:], level=4)
+                heading = doc.add_heading(stripped[5:], level=4)
+                for run in heading.runs:
+                    from docx.shared import RGBColor
+                    run.font.color.rgb = RGBColor(0, 0, 0)  # Explicit black
             elif stripped.startswith('##### '):
-                doc.add_heading(stripped[6:], level=5)
+                heading = doc.add_heading(stripped[6:], level=5)
+                for run in heading.runs:
+                    from docx.shared import RGBColor
+                    run.font.color.rgb = RGBColor(0, 0, 0)  # Explicit black
             elif stripped.startswith('###### '):
-                doc.add_heading(stripped[7:], level=6)
+                heading = doc.add_heading(stripped[7:], level=6)
+                for run in heading.runs:
+                    from docx.shared import RGBColor
+                    run.font.color.rgb = RGBColor(0, 0, 0)  # Explicit black
             
             # Handle bullet points
             elif stripped.startswith(('- ', '* ')):
@@ -1581,34 +1621,69 @@ def markdown_to_docx_bytes(markdown_text: str, extra_css: Optional[str] = None) 
     )
 
 
+def _process_cell_markdown(cell, text, is_header=False):
+    """Process markdown formatting in table cell text"""
+    from docx.shared import RGBColor
+    import re
+
+    # Clear the cell's default paragraph
+    cell.text = ''
+
+    # Split by <br> tags for line breaks
+    lines = re.split(r'<br\s*/?>', text, flags=re.IGNORECASE)
+
+    for line_idx, line in enumerate(lines):
+        # Add paragraph for each line (except first which uses existing paragraph)
+        if line_idx == 0:
+            para = cell.paragraphs[0]
+        else:
+            para = cell.add_paragraph()
+
+        # Parse **bold** syntax
+        parts = re.split(r'(\*\*.*?\*\*)', line)
+
+        for part in parts:
+            if part.startswith('**') and part.endswith('**'):
+                # Bold text
+                run = para.add_run(part[2:-2])
+                run.font.bold = True
+                run.font.color.rgb = RGBColor(0, 0, 0)
+            else:
+                # Regular text
+                run = para.add_run(part)
+                if is_header:
+                    run.font.bold = True
+                run.font.color.rgb = RGBColor(0, 0, 0)
+
+
 def _add_table_to_doc(doc, table_lines):
-    """Helper function to add a table to the document"""
+    """Helper function to add a table to the document with markdown formatting support"""
+    from docx.shared import RGBColor
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
     # Parse table
     rows = []
     for line in table_lines:
         cells = [cell.strip() for cell in line.split('|') if cell.strip()]
         if cells and not all(re.match(r'^[-:\s]+$', cell) for cell in cells):
             rows.append(cells)
-    
+
     if len(rows) < 2:
         return
-    
-    # Create table
+
+    # Create table with plain grid style
     num_cols = len(rows[0])
     table = doc.add_table(rows=len(rows), cols=num_cols)
-    table.style = 'Light Grid Accent 1'
-    
-    # Fill table
+    table.style = 'Table Grid'  # Plain black grid style
+
+    # Fill table with markdown processing
     for i, row_data in enumerate(rows):
         row_cells = table.rows[i].cells
         for j, cell_text in enumerate(row_data):
             if j < len(row_cells):
-                row_cells[j].text = cell_text
-                # Bold header row
-                if i == 0:
-                    for paragraph in row_cells[j].paragraphs:
-                        for run in paragraph.runs:
-                            run.font.bold = True
+                # Process markdown in cell text
+                _process_cell_markdown(row_cells[j], cell_text, is_header=(i == 0))
 
 
 def _apply_inline_formatting(para):
