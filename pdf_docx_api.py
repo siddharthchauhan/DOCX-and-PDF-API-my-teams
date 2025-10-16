@@ -6,7 +6,7 @@ import json
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel, field_validator
 
 # Markdown parsing with GitHub-like features
@@ -185,13 +185,13 @@ html, body {{
 }}
 
 h1, h2, h3, h4, h5, h6 {{
-  font-weight: 600; line-height: 1.25; margin: 1.2em 0 .6em;
+  font-weight: 600; line-height: 1.25; margin: 0.6em 0 0.3em;
 }}
 h1 {{ font-size: 2em; border-bottom: 1px solid var(--border); padding-bottom: .3em; }}
 h2 {{ font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: .3em; }}
 h3 {{ font-size: 1.25em; }}
 
-p, ul, ol, dl, blockquote, table, pre {{ margin: 0.75em 0; }}
+p, ul, ol, dl, blockquote, table, pre {{ margin: 0.4em 0; }}
 ul, ol {{ padding-left: 2em; }}
 
 blockquote {{
@@ -212,17 +212,42 @@ pre code {{ background: transparent; border: none; padding: 0; }}
 table {{ 
   width: 100%; 
   border-collapse: collapse; 
-  table-layout: fixed; /* Fixed layout for better width control */
+  table-layout: auto; /* Auto layout for better content fitting */
   word-wrap: break-word; /* Break long words */
-  font-size: 0.8em; /* Smaller font for tables */
+  font-size: 0.9em; /* Increased font size for better readability */
+  max-width: 100%; /* Ensure table doesn't exceed container */
+  margin: 0 auto; /* Center table */
 }}
 table th, table td {{ 
   border: 1px solid var(--border); 
-  padding: 2px 4px; /* Reduced padding for better fit */
+  padding: 6px 8px; /* Increased padding for better readability */
   word-wrap: break-word;
   overflow-wrap: break-word;
   hyphens: auto; /* Enable hyphenation */
-  max-width: 0; /* Force equal column widths */
+  max-width: 400px; /* Further increased max width for better text distribution */
+  white-space: normal; /* Allow text wrapping */
+  vertical-align: top; /* Align content to top */
+}}
+/* Narrow columns for short content (≤3 characters) */
+table th:nth-child(n), table td:nth-child(n) {{
+  min-width: 20px; /* Minimum width for narrow columns */
+}}
+/* Specific styling for very narrow content - even smaller widths */
+table th:has-text("X"), table td:has-text("X"),
+table th:has-text("✓"), table td:has-text("✓"),
+table th:has-text("•"), table td:has-text("•") {{
+  width: 15px;
+  text-align: center;
+  padding: 1px;
+  min-width: 15px;
+  max-width: 15px;
+}}
+
+/* Ensure tables use full available width */
+table {{
+  width: 100% !important;
+  max-width: 100% !important;
+  table-layout: fixed; /* Better control over column widths */
 }}
 table th {{ 
   background: #f3f4f6; 
@@ -234,7 +259,26 @@ table[data-wide="true"] {{
   font-size: 0.7em;
 }}
 table[data-wide="true"] th, table[data-wide="true"] td {{
-  padding: 1px 2px;
+  padding: 2px 4px;
+  max-width: 200px; /* Smaller max width for wide tables */
+}}
+/* Ensure tables don't overflow the container */
+.markdown-body table {{
+  overflow-x: auto;
+  display: block;
+  white-space: nowrap;
+}}
+.markdown-body table thead,
+.markdown-body table tbody,
+.markdown-body table tr {{
+  display: table;
+  width: 100%;
+  table-layout: fixed;
+}}
+.markdown-body table th,
+.markdown-body table td {{
+  display: table-cell;
+  white-space: normal;
 }}
 
 hr {{ border: none; border-top: 1px solid var(--border); margin: 1.5em 0; }}
@@ -375,7 +419,7 @@ def process_mermaid_diagrams_in_markdown(markdown_text: str) -> str:
 
 
 def parse_markdown_table(table_lines):
-    """Parse markdown table lines into a ReportLab Table with proper width constraints"""
+    """Parse markdown table lines into a ReportLab Table with dynamic width constraints and proper text wrapping"""
     if not table_lines:
         return None
 
@@ -400,51 +444,154 @@ def parse_markdown_table(table_lines):
         return None
 
     # Calculate available width (A4 page width minus margins)
-    page_width = A4[0]  # A4 width in points
-    left_margin = 72
-    right_margin = 72
-    available_width = page_width - left_margin - right_margin
-
-    # Calculate column widths based on content
+    page_width = A4[0]  # A4 width in points (595.28 points)
+    left_margin = 20  # Minimal margins to maximize table space
+    right_margin = 20
+    available_width = page_width - left_margin - right_margin  # ~555 points available (maximum space)
+    
     num_cols = len(rows[0]) if rows else 1
-
-    # For tables with many columns, use smaller widths
-    if num_cols > 6:
-        # For wide tables, use smaller font and tighter spacing
-        col_width = available_width / num_cols
+    
+    # Dynamic column width calculation based on content analysis
+    col_widths = []
+    
+    # Analyze content length in each column to determine optimal widths
+    max_content_lengths = []
+    for col_idx in range(num_cols):
+        max_length = 0
+        for row in rows:
+            if col_idx < len(row):
+                # Count characters, considering that long words will wrap
+                cell_length = len(row[col_idx])
+                max_length = max(max_length, cell_length)
+        max_content_lengths.append(max_length)
+    
+    # Classify columns as narrow or wide with much better thresholds
+    narrow_cols = []  # columns with max content ≤ 3 chars (X, ✓, •, etc.)
+    medium_cols = []   # columns with content 4-15 chars (short text)
+    wide_cols = []     # columns with longer content
+    
+    for i, content_length in enumerate(max_content_lengths):
+        if content_length <= 3:  # Very narrow columns (X markers, etc.)
+            narrow_cols.append(i)
+        elif content_length <= 15:  # Medium columns (short text)
+            medium_cols.append(i)
+        else:
+            wide_cols.append(i)
+    
+    # Calculate widths with much better space utilization:
+    # - Narrow columns: 15-20 points each (just enough for X + padding)
+    # - Medium columns: 40-60 points each (reasonable for short text)
+    # - Wide columns: share remaining width proportionally
+    
+    narrow_width = 15  # Even smaller width for X markers and similar
+    medium_width = 45  # Slightly reduced width for short text
+    total_narrow_width = len(narrow_cols) * narrow_width
+    total_medium_width = len(medium_cols) * medium_width
+    remaining_width = available_width - total_narrow_width - total_medium_width
+    
+    # Ensure we have enough space for wide columns (at least 50% of available width)
+    if remaining_width < available_width * 0.5:
+        # If too many narrow/medium columns, reduce their width but keep them readable
+        if len(narrow_cols) > 0:
+            narrow_width = max(12, remaining_width * 0.15 / len(narrow_cols))
+        if len(medium_cols) > 0:
+            medium_width = max(30, remaining_width * 0.25 / len(medium_cols))
+        total_narrow_width = len(narrow_cols) * narrow_width
+        total_medium_width = len(medium_cols) * medium_width
+        remaining_width = available_width - total_narrow_width - total_medium_width
+    
+    # Distribute remaining width among wide columns with better proportions
+    if wide_cols:
+        wide_content_lengths = [max_content_lengths[i] for i in wide_cols]
+        total_wide_weight = sum(wide_content_lengths)
+        
+        for i, col_idx in enumerate(wide_cols):
+            if total_wide_weight > 0:
+                # Proportional width for wide columns with increased maximum
+                proportional_width = (wide_content_lengths[i] / total_wide_weight) * remaining_width
+                # Increased maximum width constraint (80% of available width) for better text distribution
+                max_width = available_width * 0.8
+                col_width = min(max_width, proportional_width)
+            else:
+                col_width = remaining_width / len(wide_cols)
+            col_widths.append((col_idx, col_width))
+    else:
+        # No wide columns, distribute remaining width among narrow and medium columns
+        if len(narrow_cols) > 0 and len(medium_cols) > 0:
+            narrow_width = remaining_width * 0.3 / len(narrow_cols)
+            medium_width = remaining_width * 0.7 / len(medium_cols)
+        elif len(narrow_cols) > 0:
+            narrow_width = remaining_width / len(narrow_cols)
+        elif len(medium_cols) > 0:
+            medium_width = remaining_width / len(medium_cols)
+    
+    # Add narrow and medium column widths
+    for col_idx in narrow_cols:
+        col_widths.append((col_idx, narrow_width))
+    for col_idx in medium_cols:
+        col_widths.append((col_idx, medium_width))
+    
+    # Sort by column index and extract widths
+    col_widths.sort(key=lambda x: x[0])
+    col_widths = [width for _, width in col_widths]
+    
+    # Final safety check - ensure total width doesn't exceed available width
+    total_width = sum(col_widths)
+    if total_width > available_width:
+        # Scale down proportionally
+        scale_factor = available_width / total_width
+        col_widths = [width * scale_factor for width in col_widths]
+    
+    # Determine font sizes and padding based on table complexity
+    if num_cols > 12:
+        font_size_header = 5
+        font_size_data = 4
+        padding = 0.5
+    elif num_cols > 8:
+        font_size_header = 6
+        font_size_data = 5
+        padding = 1
+    elif num_cols > 6:
         font_size_header = 7
         font_size_data = 6
         padding = 2
-    else:
-        # For normal tables, use proportional widths
-        col_width = available_width / num_cols
+    elif num_cols > 4:
         font_size_header = 8
         font_size_data = 7
         padding = 3
+    else:
+        font_size_header = 9
+        font_size_data = 8
+        padding = 4
 
-    # Set column widths to ensure table fits
-    col_widths = [col_width] * num_cols
-
-    # Create paragraph styles for table cells
+    # Create paragraph styles for table cells with enhanced text wrapping
     from reportlab.lib.styles import ParagraphStyle
-    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.enums import TA_LEFT, TA_JUSTIFY
 
     cell_style_header = ParagraphStyle(
         'TableCellHeader',
         fontName='Helvetica-Bold',
         fontSize=font_size_header,
-        leading=font_size_header * 1.2,
+        leading=font_size_header * 1.4,  # Increased leading for better readability
         alignment=TA_LEFT,
-        wordWrap='CJK'
+        wordWrap='CJK',
+        splitLongWords=True,
+        keepWithNext=False,
+        spaceAfter=0,
+        spaceBefore=0
     )
 
     cell_style_data = ParagraphStyle(
         'TableCellData',
         fontName='Helvetica',
         fontSize=font_size_data,
-        leading=font_size_data * 1.2,
+        leading=font_size_data * 1.4,  # Increased leading for better readability
         alignment=TA_LEFT,
-        wordWrap='CJK'
+        wordWrap='CJK',
+        splitLongWords=True,
+        keepWithNext=False,
+        spaceAfter=0,
+        spaceBefore=0
     )
 
     # Process table data using Paragraph objects for proper wrapping
@@ -454,33 +601,67 @@ def parse_markdown_table(table_lines):
         is_header = (i == 0)
         style = cell_style_header if is_header else cell_style_data
 
-        for cell in row:
-            # Process bold text in cells
+        for j, cell in enumerate(row):
+            # Process bold text in cells and handle existing <br> tags
             processed_cell = process_bold_text(cell)
+            
+            # Handle any existing <br> tags in the input text
+            processed_cell = processed_cell.replace('<br>', '<br/>')
+            processed_cell = processed_cell.replace('<br />', '<br/>')
+            
+            # For very long content, add line breaks to help with wrapping
+            if len(processed_cell) > 80:
+                # Insert soft breaks at natural word boundaries
+                words = processed_cell.split()
+                lines = []
+                current_line = ""
+                
+                for word in words:
+                    if len(current_line + " " + word) <= 40:  # Target ~40 chars per line
+                        if current_line:
+                            current_line += " " + word
+                        else:
+                            current_line = word
+                    else:
+                        if current_line:
+                            lines.append(current_line)
+                            current_line = word
+                        else:
+                            lines.append(word)
+                
+                if current_line:
+                    lines.append(current_line)
+                
+                processed_cell = "<br/>".join(lines)
+            
             # Create Paragraph object for proper text wrapping
             cell_paragraph = Paragraph(processed_cell, style)
             processed_row.append(cell_paragraph)
         table_data.append(processed_row)
 
     # Create ReportLab Table with explicit column widths
-    table = Table(table_data, colWidths=col_widths)
+    table = Table(table_data, colWidths=col_widths, repeatRows=1)
 
-    # Style the table
+    # Style the table with improved borders and spacing
     table_style = TableStyle([
         # Header row styling
         ('BACKGROUND', (0, 0), (-1, 0), lightgrey),
         ('TEXTCOLOR', (0, 0), (-1, 0), black),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
 
         # Borders
         ('GRID', (0, 0), (-1, -1), 0.5, black),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-
-        # Padding - reduced for better fit
+        
+        # Padding - optimized for readability
         ('LEFTPADDING', (0, 0), (-1, -1), padding),
         ('RIGHTPADDING', (0, 0), (-1, -1), padding),
         ('TOPPADDING', (0, 0), (-1, -1), padding),
         ('BOTTOMPADDING', (0, 0), (-1, -1), padding),
+        
+        # Enhanced text handling
+        ('WORDWRAP', (0, 0), (-1, -1), 'CJK'),
+        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
     ])
 
     table.setStyle(table_style)
@@ -529,10 +710,17 @@ def process_bold_text(text: str) -> str:
     """Convert markdown bold syntax to HTML bold tags for ReportLab"""
     import re
 
-    # First, escape HTML special characters to prevent issues
+    # First, preserve <br/> tags before escaping other HTML
+    text = text.replace('<br/>', '___BR_TAG___')
+    text = text.replace('<br>', '___BR_TAG___')
+    
+    # Escape HTML special characters to prevent issues
     # but preserve them for later restoration
     text = text.replace('&', '&amp;')
     text = text.replace('<', '&lt;').replace('>', '&gt;')
+    
+    # Restore <br/> tags as proper line breaks
+    text = text.replace('___BR_TAG___', '<br/>')
 
     # Handle **bold** syntax
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
@@ -636,6 +824,34 @@ def is_mermaid_diagram(code_block: str, language: str) -> bool:
     return language and language.lower() in ['mermaid', 'mmd']
 
 
+def validate_docx_file(docx_bytes: bytes) -> bool:
+    """Validate that the bytes represent a valid DOCX file"""
+    try:
+        # Check if it's empty
+        if len(docx_bytes) == 0:
+            return False
+        
+        # Check ZIP signature (DOCX files are ZIP archives)
+        if not docx_bytes.startswith(b'PK'):
+            return False
+        
+        # Try to parse as ZIP to ensure it's valid
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(docx_bytes), 'r') as zip_file:
+            # Check for required DOCX files
+            required_files = ['[Content_Types].xml', 'word/document.xml']
+            file_list = zip_file.namelist()
+            
+            for required_file in required_files:
+                if required_file not in file_list:
+                    return False
+        
+        return True
+    except Exception as e:
+        print(f"DOCX validation failed: {e}")
+        return False
+
+
 def create_mermaid_placeholder(mermaid_code: str) -> str:
     """Create a text placeholder for Mermaid diagrams when rendering fails"""
     lines = mermaid_code.strip().split('\n')
@@ -681,10 +897,17 @@ class NumberedCanvas(canvas.Canvas):
                 page_width, page_height = A4
             
             # Header - Leave blank as requested (no document title)
-            # Just add a subtle line for visual separation
+            # Just add a subtle line for visual separation - FULL PAGE WIDTH
             self.setStrokeColor(grey)
             self.setLineWidth(0.5)
-            self.line(72, page_height - 30, page_width - 72, page_height - 30)
+            self.line(0, page_height - 30, page_width, page_height - 30)
+            
+            # Footer - Generation date at bottom left (aligned with full-width line)
+            from datetime import datetime
+            current_date = datetime.now().strftime("%d-%b-%Y")
+            self.setFont("Helvetica", 9)
+            self.setFillColor(grey)
+            self.drawString(30, 30, current_date)  # Reduced margin to align with full-width line
             
             # Footer - "Confidential" at bottom center
             self.setFont("Helvetica-Bold", 9)
@@ -693,17 +916,17 @@ class NumberedCanvas(canvas.Canvas):
             confidential_width = self.stringWidth(confidential_text, "Helvetica-Bold", 9)
             self.drawString((page_width - confidential_width) / 2, 30, confidential_text)
             
-            # Footer - Page number at bottom right
+            # Footer - Page number at bottom right (aligned with full-width line)
             self.setFont("Helvetica", 9)
             self.setFillColor(grey)
             page_text = f"Page {page_num}"
             text_width = self.stringWidth(page_text, "Helvetica", 9)
-            self.drawString(page_width - text_width - 72, 30, page_text)
+            self.drawString(page_width - text_width - 30, 30, page_text)  # Reduced margin to align with full-width line
             
-            # Footer line
+            # Footer line - FULL PAGE WIDTH
             self.setStrokeColor(grey)
             self.setLineWidth(0.5)
-            self.line(72, 50, page_width - 72, 50)
+            self.line(0, 50, page_width, 50)
         except Exception as e:
             # If pagination fails, just continue without it
             print(f"Warning: Could not draw page numbers: {e}")
@@ -744,14 +967,9 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("ReportLab is not available for PDF generation")
     
-    # Extract document title from markdown (first H1 heading)
+    # Use generic document title instead of extracting from markdown
+    # This prevents "Protocol Title:" from appearing in headers
     document_title = "Document"
-    lines = markdown_text.split('\n')
-    for line in lines:
-        line = line.strip()
-        if line.startswith('# '):
-            document_title = line[2:].strip()
-            break
     
     # Create a BytesIO buffer to hold the PDF
     buffer = io.BytesIO()
@@ -759,14 +977,14 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
     # Create PDF document with better margins and space for headers/footers
     try:
         doc = NumberedDocTemplate(buffer, document_title=document_title, pagesize=A4, 
-                                rightMargin=72, leftMargin=72, 
-                                topMargin=100, bottomMargin=100)
+                                rightMargin=20, leftMargin=20, 
+                                topMargin=30, bottomMargin=50)
     except Exception as e:
         print(f"Warning: Custom template failed, using SimpleDocTemplate: {e}")
         # Fallback to SimpleDocTemplate without pagination
         doc = SimpleDocTemplate(buffer, pagesize=A4, 
-                               rightMargin=72, leftMargin=72, 
-                               topMargin=72, bottomMargin=72)
+                               rightMargin=20, leftMargin=20, 
+                               topMargin=30, bottomMargin=50)
     
     # Get styles
     styles = getSampleStyleSheet()
@@ -776,7 +994,7 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
         'CustomTitle',
         parent=styles['Heading1'],
         fontSize=18,
-        spaceAfter=12,
+        spaceAfter=6,
         spaceBefore=0,
         alignment=TA_LEFT,
         textColor=black,
@@ -788,8 +1006,8 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
         'CustomHeading',
         parent=styles['Heading2'],
         fontSize=14,
-        spaceAfter=10,
-        spaceBefore=12,
+        spaceAfter=4,
+        spaceBefore=6,
         alignment=TA_LEFT,
         textColor=black,
         fontName='Helvetica-Bold',
@@ -800,8 +1018,8 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
         'CustomSubHeading',
         parent=styles['Heading3'],
         fontSize=12,
-        spaceAfter=8,
-        spaceBefore=10,
+        spaceAfter=3,
+        spaceBefore=4,
         alignment=TA_LEFT,
         textColor=black,
         fontName='Helvetica-Bold',
@@ -812,8 +1030,8 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
         'CustomSubSubHeading',
         parent=styles['Heading4'],
         fontSize=11,
-        spaceAfter=6,
-        spaceBefore=8,
+        spaceAfter=2,
+        spaceBefore=3,
         alignment=TA_LEFT,
         textColor=black,
         fontName='Helvetica-Bold',
@@ -824,8 +1042,8 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
         'CustomNormal',
         parent=styles['Normal'],
         fontSize=10,
-        spaceAfter=6,
-        spaceBefore=2,
+        spaceAfter=3,
+        spaceBefore=1,
         alignment=TA_LEFT,
         textColor=black,
         fontName='Helvetica',
@@ -837,8 +1055,8 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
         'CustomBullet',
         parent=styles['Normal'],
         fontSize=10,
-        spaceAfter=6,
-        spaceBefore=4,
+        spaceAfter=3,
+        spaceBefore=2,
         alignment=TA_LEFT,
         textColor=black,
         fontName='Helvetica',
@@ -852,8 +1070,8 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
         'CustomCode',
         parent=styles['Code'],
         fontSize=8,
-        spaceAfter=12,
-        spaceBefore=12,
+        spaceAfter=6,
+        spaceBefore=6,
         alignment=TA_LEFT,
         textColor=black,
         fontName='Courier',
@@ -983,6 +1201,9 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
             text = line[2:].strip()
             # Process bold text
             text = process_bold_text(text)
+            # Handle any existing <br> tags in the input text
+            text = text.replace('<br>', '<br/>')
+            text = text.replace('<br />', '<br/>')
             # Handle nested bullets
             indent_level = 0
             while original_line.startswith('  '):
@@ -997,12 +1218,18 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
         # Handle numbered lists
         elif line.startswith(('1. ', '2. ', '3. ', '4. ', '5. ', '6. ', '7. ', '8. ', '9. ')):
             processed_line = process_bold_text(line)
+            # Handle any existing <br> tags in the input text
+            processed_line = processed_line.replace('<br>', '<br/>')
+            processed_line = processed_line.replace('<br />', '<br/>')
             elements.append(Paragraph(processed_line, normal_style))
         
         # Handle regular text (plain text only)
         else:
             if line:
                 processed_line = process_bold_text(line)
+                # Handle any existing <br> tags in the input text
+                processed_line = processed_line.replace('<br>', '<br/>')
+                processed_line = processed_line.replace('<br />', '<br/>')
                 elements.append(Paragraph(processed_line, normal_style))
     
     # Handle any remaining code block
@@ -1133,7 +1360,12 @@ def _create_reference_docx() -> str:
 def markdown_to_docx_bytes(markdown_text: str, extra_css: Optional[str] = None) -> bytes:
     """
     Prefer Pandoc for best fidelity with pagination. Fallback to HTML->DOCX with html2docx.
+    Enhanced with better error handling and file validation.
     """
+    # Handle empty or whitespace-only markdown
+    if not markdown_text or not markdown_text.strip():
+        markdown_text = "# Empty Document\n\nThis document contains no content."
+    
     if PANDOC_AVAILABLE:
         # Pandoc needs an output file path for binary outputs
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp_out:
@@ -1162,8 +1394,23 @@ def markdown_to_docx_bytes(markdown_text: str, extra_css: Optional[str] = None) 
                     extra_args=extra_args
                 )
                 
+                # Validate the generated file
+                if not os.path.exists(tmp_out_path):
+                    raise RuntimeError("Pandoc failed to generate output file")
+                
+                file_size = os.path.getsize(tmp_out_path)
+                if file_size == 0:
+                    raise RuntimeError("Pandoc generated empty file")
+                
+                # Additional validation: try to read the file
                 with open(tmp_out_path, "rb") as f:
                     data = f.read()
+                
+                # Validate DOCX file structure using comprehensive validation
+                if not validate_docx_file(data):
+                    raise RuntimeError("Generated file is not a valid DOCX file")
+                
+                print(f"Pandoc successfully generated DOCX file ({file_size} bytes)")
                 return data
             except Exception as e:
                 print(f"Pandoc conversion failed: {e}")
@@ -1171,176 +1418,262 @@ def markdown_to_docx_bytes(markdown_text: str, extra_css: Optional[str] = None) 
                 pass
         finally:
             try:
-                os.remove(tmp_out_path)
+                if os.path.exists(tmp_out_path):
+                    os.remove(tmp_out_path)
                 # Clean up reference document if it was created
                 if 'reference_doc_path' in locals() and reference_doc_path and os.path.exists(reference_doc_path):
                     os.remove(reference_doc_path)
-            except Exception:
+            except Exception as e:
+                print(f"Warning: Could not clean up temporary files: {e}")
                 pass
 
     if HTML2DOCX_AVAILABLE:
-        # Direct markdown-to-DOCX conversion without html2docx
-        from docx.shared import Pt, RGBColor
+        # Enhanced DOCX generation with proper structure
+        from docx.shared import Pt, Inches
         from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
 
+        # Create document
         doc = Document()
+        
+        # Set up sections with headers and footers
+        section = doc.sections[0]
+        
+        # Add header
+        header = section.header
+        header_para = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+        header_para.text = "Confidential"
+        header_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if header_para.runs:
+            header_para.runs[0].font.bold = True
+            header_para.runs[0].font.size = Pt(10)
+        
+        # Add footer with page numbers
+        footer = section.footer
+        footer_para = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+        footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Add page number field
+        try:
+            from datetime import datetime
+            current_date = datetime.now().strftime("%d-%b-%Y")
+            
+            # Add date
+            run = footer_para.add_run(f"{current_date} | Page ")
+            
+            # Add page number field
+            fldChar1 = OxmlElement('w:fldChar')
+            fldChar1.set(qn('w:fldCharType'), 'begin')
+            footer_para._p.append(fldChar1)
+            
+            instrText = OxmlElement('w:instrText')
+            instrText.text = "PAGE"
+            footer_para._p.append(instrText)
+            
+            fldChar2 = OxmlElement('w:fldChar')
+            fldChar2.set(qn('w:fldCharType'), 'end')
+            footer_para._p.append(fldChar2)
+        except Exception as e:
+            print(f"Could not add page numbers: {e}")
+            footer_para.text = "Confidential"
 
-        # Add headers and footers to the document
-        sections = doc.sections
-        for section in sections:
-            # Set header
-            try:
-                header = section.header
-                header_para = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
-                header_para.text = "Confidential"
-                header_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                # Make header bold
-                if header_para.runs:
-                    for run in header_para.runs:
-                        run.bold = True
-                        run.font.size = Pt(10)
-            except Exception as e:
-                print(f"Could not set header: {e}")
-
-            # Set footer with page number
-            try:
-                footer = section.footer
-                footer_para = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
-                footer_para.text = "Page "
-                footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            except Exception as e:
-                print(f"Could not set footer: {e}")
-
-        # Parse markdown line by line
+        # Parse markdown with proper formatting
         lines = markdown_text.split('\n')
-        in_code_block = False
         in_table = False
-        code_lines = []
         table_lines = []
-
+        in_list = False
+        
         for line in lines:
-            # Handle code blocks
-            if line.strip().startswith('```'):
-                if in_code_block:
-                    # End code block
-                    code_text = '\n'.join(code_lines)
-                    para = doc.add_paragraph(code_text)
-                    para.style = 'Normal'
-                    for run in para.runs:
-                        run.font.name = 'Courier New'
-                        run.font.size = Pt(9)
-                    code_lines = []
-                    in_code_block = False
-                else:
-                    # Start code block
-                    in_code_block = True
+            stripped = line.strip()
+            
+            # Handle empty lines
+            if not stripped:
+                if in_table:
+                    # Process accumulated table
+                    if len(table_lines) >= 2:
+                        _add_table_to_doc(doc, table_lines)
+                    in_table = False
+                    table_lines = []
+                in_list = False
                 continue
-
-            if in_code_block:
-                code_lines.append(line)
-                continue
-
+            
             # Handle tables
-            if '|' in line and line.strip():
+            if '|' in stripped and not stripped.startswith('#'):
                 if not in_table:
                     in_table = True
                     table_lines = []
                 table_lines.append(line)
                 continue
             elif in_table:
-                # End table
+                # End of table
                 if len(table_lines) >= 2:
-                    # Parse table
-                    rows = []
-                    for tline in table_lines:
-                        cells = [cell.strip() for cell in tline.split('|') if cell.strip()]
-                        if cells and not all(re.match(r'^[-:\s]+$', cell) for cell in cells):
-                            rows.append(cells)
-
-                    if rows:
-                        table = doc.add_table(rows=len(rows), cols=len(rows[0]))
-                        table.style = 'Light Grid Accent 1'
-                        for i, row in enumerate(rows):
-                            for j, cell_text in enumerate(row):
-                                cell = table.rows[i].cells[j]
-                                cell.text = cell_text
-                                # Make header bold
-                                if i == 0:
-                                    for para in cell.paragraphs:
-                                        for run in para.runs:
-                                            run.bold = True
-
+                    _add_table_to_doc(doc, table_lines)
                 in_table = False
                 table_lines = []
-
+            
             # Handle headings
-            if line.startswith('# '):
-                doc.add_heading(line[2:].strip(), level=1)
-            elif line.startswith('## '):
-                doc.add_heading(line[3:].strip(), level=2)
-            elif line.startswith('### '):
-                doc.add_heading(line[4:].strip(), level=3)
-            elif line.startswith('#### '):
-                doc.add_heading(line[5:].strip(), level=4)
-
+            if stripped.startswith('# '):
+                doc.add_heading(stripped[2:], level=1)
+            elif stripped.startswith('## '):
+                doc.add_heading(stripped[3:], level=2)
+            elif stripped.startswith('### '):
+                doc.add_heading(stripped[4:], level=3)
+            elif stripped.startswith('#### '):
+                doc.add_heading(stripped[5:], level=4)
+            elif stripped.startswith('##### '):
+                doc.add_heading(stripped[6:], level=5)
+            elif stripped.startswith('###### '):
+                doc.add_heading(stripped[7:], level=6)
+            
             # Handle bullet points
-            elif line.startswith('- ') or line.startswith('* '):
-                para = doc.add_paragraph(line[2:].strip(), style='List Bullet')
-
+            elif stripped.startswith(('- ', '* ')):
+                text = stripped[2:]
+                para = doc.add_paragraph(text, style='List Bullet')
+                _apply_inline_formatting(para)
+                in_list = True
+            
             # Handle numbered lists
-            elif line.startswith(('1. ', '2. ', '3. ', '4. ', '5. ', '6. ', '7. ', '8. ', '9. ')):
-                para = doc.add_paragraph(line[3:].strip(), style='List Number')
-
+            elif stripped[:2].isdigit() and stripped[2:4] in ('. ', ') '):
+                text = stripped[stripped.index(' ')+1:]
+                para = doc.add_paragraph(text, style='List Number')
+                _apply_inline_formatting(para)
+                in_list = True
+            
             # Handle horizontal rules
-            elif line.strip() == '---':
-                para = doc.add_paragraph()
-                para.add_run('_' * 50)
-
-            # Regular text
-            elif line.strip():
-                para = doc.add_paragraph(line.strip())
-                # Process bold text
-                if '**' in line:
-                    para.clear()
-                    parts = line.split('**')
-                    for i, part in enumerate(parts):
-                        run = para.add_run(part)
-                        if i % 2 == 1:  # Odd indices are bold
-                            run.bold = True
-
-        # Handle remaining table
+            elif stripped in ('---', '***', '___'):
+                doc.add_paragraph('_' * 50)
+            
+            # Regular paragraphs
+            else:
+                para = doc.add_paragraph(stripped)
+                _apply_inline_formatting(para)
+        
+        # Handle any remaining table
         if in_table and len(table_lines) >= 2:
-            rows = []
-            for tline in table_lines:
-                cells = [cell.strip() for cell in tline.split('|') if cell.strip()]
-                if cells and not all(re.match(r'^[-:\s]+$', cell) for cell in cells):
-                    rows.append(cells)
+            _add_table_to_doc(doc, table_lines)
 
-            if rows:
-                table = doc.add_table(rows=len(rows), cols=len(rows[0]))
-                table.style = 'Light Grid Accent 1'
-                for i, row in enumerate(rows):
-                    for j, cell_text in enumerate(row):
-                        cell = table.rows[i].cells[j]
-                        cell.text = cell_text
-                        if i == 0:
-                            for para in cell.paragraphs:
-                                for run in para.runs:
-                                    run.bold = True
-
+        # Save document
         buf = io.BytesIO()
-        doc.save(buf)
-        buf.seek(0)
-        return buf.read()
+        try:
+            doc.save(buf)
+            buf.seek(0)
+            data = buf.getvalue()
+            
+            # Validate
+            if len(data) == 0:
+                raise RuntimeError("Generated empty DOCX file")
+            
+            if not data.startswith(b'PK'):
+                raise RuntimeError("Generated file is not a valid DOCX")
+            
+            print(f"Successfully generated DOCX file ({len(data)} bytes)")
+            return data
+            
+        except Exception as e:
+            print(f"Error saving DOCX: {e}")
+            raise RuntimeError(f"Failed to save DOCX: {str(e)}")
+        finally:
+            buf.close()
 
     raise RuntimeError(
         "No DOCX backend available. Install pypandoc (recommended) or python-docx."
     )
 
 
+def _add_table_to_doc(doc, table_lines):
+    """Helper function to add a table to the document"""
+    # Parse table
+    rows = []
+    for line in table_lines:
+        cells = [cell.strip() for cell in line.split('|') if cell.strip()]
+        if cells and not all(re.match(r'^[-:\s]+$', cell) for cell in cells):
+            rows.append(cells)
+    
+    if len(rows) < 2:
+        return
+    
+    # Create table
+    num_cols = len(rows[0])
+    table = doc.add_table(rows=len(rows), cols=num_cols)
+    table.style = 'Light Grid Accent 1'
+    
+    # Fill table
+    for i, row_data in enumerate(rows):
+        row_cells = table.rows[i].cells
+        for j, cell_text in enumerate(row_data):
+            if j < len(row_cells):
+                row_cells[j].text = cell_text
+                # Bold header row
+                if i == 0:
+                    for paragraph in row_cells[j].paragraphs:
+                        for run in paragraph.runs:
+                            run.font.bold = True
+
+
+def _apply_inline_formatting(para):
+    """Apply bold and other inline formatting to a paragraph"""
+    text = para.text
+    para.clear()
+    
+    # Handle **bold** syntax
+    import re
+    parts = re.split(r'(\*\*.*?\*\*)', text)
+    
+    for part in parts:
+        if part.startswith('**') and part.endswith('**'):
+            run = para.add_run(part[2:-2])
+            run.font.bold = True
+        else:
+            para.add_run(part)
+
+
+@app.post("/test-docx")
+async def test_docx():
+    """Test endpoint to generate a simple DOCX file"""
+    try:
+        # Create a simple test document
+        from docx import Document
+        from docx.shared import Pt
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        
+        doc = Document()
+        
+        # Add simple content
+        doc.add_heading("Test Document", level=1)
+        doc.add_paragraph("This is a test document to verify DOCX generation works.")
+        doc.add_paragraph("If you can see this, the DOCX file is working correctly.")
+        
+        # Add footer
+        from datetime import datetime
+        current_date = datetime.now().strftime("%d-%b-%Y")
+        footer_para = doc.add_paragraph(f"{current_date} | Test Document")
+        footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Save to buffer
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        data = buf.getvalue()
+        buf.close()
+        
+        # Validate
+        if len(data) == 0 or not data.startswith(b'PK'):
+            raise RuntimeError("Generated invalid DOCX file")
+        
+        return Response(
+            content=data,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": "attachment; filename=test_document.docx"}
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Test DOCX generation failed: {str(e)}")
+
+
 @app.post("/render/docx-raw")
 async def render_docx_raw(request: Request):
-    """Render DOCX from raw JSON body"""
+    """Render DOCX from raw JSON body with enhanced error handling"""
     try:
         # Get raw body and parse JSON
         body = await request.body()
@@ -1355,14 +1688,24 @@ async def render_docx_raw(request: Request):
         if not markdown:
             raise HTTPException(status_code=400, detail="markdown field is required")
         
-        # Generate DOCX
+        # Sanitize filename
+        filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '', str(filename)).strip()
+        if not filename:
+            filename = "document"
+        
+        # Generate DOCX with validation
         docx_bytes = markdown_to_docx_bytes(markdown, extra_css=css)
+        
+        # Final validation before sending
+        if not validate_docx_file(docx_bytes):
+            raise HTTPException(status_code=500, detail="Generated DOCX file is corrupted")
         
         return StreamingResponse(
             io.BytesIO(docx_bytes),
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={
-                "Content-Disposition": f'attachment; filename="{filename}.docx"'
+                "Content-Disposition": f'attachment; filename="{filename}.docx"',
+                "Content-Length": str(len(docx_bytes))
             }
         )
         
@@ -1370,7 +1713,11 @@ async def render_docx_raw(request: Request):
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
+        print(f"Unexpected error in DOCX rendering: {e}")
         raise HTTPException(status_code=500, detail=f"DOCX rendering error: {str(e)}")
 
 
@@ -1430,19 +1777,30 @@ def render_pdf(req: RenderRequest):
 
 @app.post("/render/docx")
 def render_docx(req: RenderRequest):
+    """Render DOCX with enhanced error handling and validation"""
     try:
         docx_bytes = markdown_to_docx_bytes(req.markdown, extra_css=req.css)
+        
+        # Final validation before sending
+        if not validate_docx_file(docx_bytes):
+            raise HTTPException(status_code=500, detail="Generated DOCX file is corrupted")
+        
         filename = req.filename.replace('"', "").replace("\n", "")
         return StreamingResponse(
             io.BytesIO(docx_bytes),
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={
-                "Content-Disposition": f'attachment; filename="{filename}.docx"'
+                "Content-Disposition": f'attachment; filename="{filename}.docx"',
+                "Content-Length": str(len(docx_bytes))
             }
         )
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
+        print(f"Unexpected error in DOCX rendering: {e}")
         raise HTTPException(status_code=500, detail=f"DOCX rendering error: {str(e)}")
 
 
