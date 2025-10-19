@@ -3,6 +3,8 @@ import os
 import tempfile
 import re
 import json
+import base64
+import subprocess
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
@@ -54,16 +56,18 @@ try:
     except OSError:
         pypandoc.download_pandoc()
     PANDOC_AVAILABLE = True
-except Exception:
+except (ImportError, AttributeError, OSError) as e:
     PANDOC_AVAILABLE = False
+    print(f"Pandoc not available: {e}")
 
 # DOCX rendering - fallback: python-docx
 PYTHON_DOCX_AVAILABLE = False
 try:
     from docx import Document
     PYTHON_DOCX_AVAILABLE = True
-except Exception:
+except ImportError as e:
     PYTHON_DOCX_AVAILABLE = False
+    print(f"python-docx not available: {e}")
 
 # Legacy html2docx import (not used anymore, but kept for compatibility)
 HTML2DOCX_AVAILABLE = PYTHON_DOCX_AVAILABLE
@@ -71,11 +75,9 @@ HTML2DOCX_AVAILABLE = PYTHON_DOCX_AVAILABLE
 # Mermaid diagram rendering
 MERMAID_AVAILABLE = False
 try:
-    import subprocess
-    import base64
     from PIL import Image
     MERMAID_AVAILABLE = True
-except Exception as e:
+except ImportError as e:
     print(f"Mermaid rendering dependencies not available: {e}")
     MERMAID_AVAILABLE = False
 
@@ -85,6 +87,24 @@ app = FastAPI(
     version="1.0.0",
     description="Render Markdown to PDF and DOCX with high fidelity."
 )
+
+
+# Startup validation
+@app.on_event("startup")
+async def startup_event():
+    """Validate that at least one rendering backend is available"""
+    if not (WEASYPRINT_AVAILABLE or REPORTLAB_AVAILABLE):
+        print("WARNING: No PDF rendering backend available. PDF generation will fail.")
+        print("Install either 'reportlab' or 'weasyprint' package.")
+    
+    if not (PANDOC_AVAILABLE or PYTHON_DOCX_AVAILABLE):
+        print("WARNING: No DOCX rendering backend available. DOCX generation will fail.")
+        print("Install either 'pypandoc' or 'python-docx' package.")
+    
+    # Log available features
+    print(f"PDF Rendering: WeasyPrint={WEASYPRINT_AVAILABLE}, ReportLab={REPORTLAB_AVAILABLE}")
+    print(f"DOCX Rendering: Pandoc={PANDOC_AVAILABLE}, python-docx={PYTHON_DOCX_AVAILABLE}")
+    print(f"Mermaid Diagrams: {MERMAID_AVAILABLE}")
 
 
 class RenderRequest(BaseModel):
@@ -139,7 +159,7 @@ class RenderRequest(BaseModel):
 def _highlight(code: str, lang: Optional[str], attrs):
     try:
         lexer = get_lexer_by_name(lang) if lang else TextLexer()
-    except Exception:
+    except (ValueError, AttributeError):
         lexer = TextLexer()
     formatter = HtmlFormatter()
     return highlight(code, lexer, formatter)
@@ -233,10 +253,10 @@ table th:nth-child(n), table td:nth-child(n) {{
   min-width: 20px; /* Minimum width for narrow columns */
 }}
 /* Specific styling for very narrow content - even smaller widths */
-table th:has-text("X"), table td:has-text("X"),
-table th:has-text("✓"), table td:has-text("✓"),
-table th:has-text("•"), table td:has-text("•") {{
-  width: 15px;
+/* Note: :has-text() is not a standard CSS selector */
+/* These styles will be applied via table processing logic */
+table th.narrow-cell, table td.narrow-cell {{
+  width: 15px !important;
   text-align: center;
   padding: 1px;
   min-width: 15px;
@@ -751,11 +771,13 @@ def render_mermaid_diagram(mermaid_code: str) -> Optional[bytes]:
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as png_file:
                 png_path = png_file.name
 
-            result = subprocess.run([
-                'mmdc', '-i', mmd_path, '-o', png_path,
-                '--width', '800', '--height', '600',
-                '--backgroundColor', 'white'
-            ], capture_output=True, text=True, timeout=30)
+            # Use subprocess.run with shell=False for security
+            cmd = ['mmdc', '-i', mmd_path, '-o', png_path,
+                   '--width', '1600', '--height', '1200',  # Increased resolution for better text readability
+                   '--backgroundColor', 'white',
+                   '--scale', '2']  # Scale factor for higher DPI
+            result = subprocess.run(cmd, capture_output=True, text=True, 
+                                    timeout=30, shell=False, check=False)
 
             if result.returncode == 0 and os.path.exists(png_path) and os.path.getsize(png_path) > 0:
                 with open(png_path, 'rb') as f:
@@ -788,15 +810,47 @@ def render_mermaid_diagram(mermaid_code: str) -> Optional[bytes]:
         try:
             import requests
             import zlib
-            # Compress and encode
+            from PIL import Image as PILImage
+            
+            # First try SVG (vector format) for highest quality
             compressed = zlib.compress(mermaid_code.encode('utf-8'), 9)
             encoded = base64.urlsafe_b64encode(compressed).decode('ascii')
-            url = f"https://kroki.io/mermaid/png/{encoded}"
-
-            response = requests.get(url, timeout=15)
+            svg_url = f"https://kroki.io/mermaid/svg/{encoded}"
+            
+            svg_response = requests.get(svg_url, timeout=15)
+            
+            if svg_response.status_code == 200 and len(svg_response.content) > 0:
+                try:
+                    # Convert SVG to high-resolution PNG
+                    from io import BytesIO
+                    import cairosvg
+                    
+                    # Convert SVG to PNG with high DPI
+                    png_data = cairosvg.svg2png(
+                        bytestring=svg_response.content,
+                        output_width=1600,  # High resolution
+                        output_height=1200,
+                        dpi=300  # High DPI for crisp text
+                    )
+                    print("Mermaid diagram rendered successfully using Kroki SVG->PNG")
+                    return png_data
+                except ImportError:
+                    print("cairosvg not available, falling back to PNG")
+                except Exception as e:
+                    print(f"SVG to PNG conversion failed: {e}")
+            
+            # Fallback to PNG with higher resolution parameters
+            # Try with scale parameter for higher resolution
+            png_url = f"https://kroki.io/mermaid/png/{encoded}?scale=2"
+            response = requests.get(png_url, timeout=15)
+            
+            # If scale parameter doesn't work, try without it
+            if response.status_code != 200:
+                png_url = f"https://kroki.io/mermaid/png/{encoded}"
+                response = requests.get(png_url, timeout=15)
 
             if response.status_code == 200 and len(response.content) > 0:
-                print("Mermaid diagram rendered successfully using Kroki")
+                print("Mermaid diagram rendered successfully using Kroki PNG")
                 return response.content
             else:
                 print(f"Kroki API failed with status {response.status_code}")
@@ -815,7 +869,7 @@ def render_mermaid_diagram(mermaid_code: str) -> Optional[bytes]:
                 os.remove(mmd_path)
             if png_path and os.path.exists(png_path):
                 os.remove(png_path)
-        except Exception:
+        except (OSError, IOError):
             pass
 
 
@@ -859,7 +913,7 @@ def create_mermaid_placeholder(mermaid_code: str) -> str:
     
     # Extract diagram type from first line
     diagram_type = "Diagram"
-    if first_line.startswith('graph'):
+    if first_line.startswith('graph') or first_line.startswith('flowchart'):
         diagram_type = "Flowchart"
     elif first_line.startswith('sequenceDiagram'):
         diagram_type = "Sequence Diagram"
@@ -1106,8 +1160,10 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
 
                     # Check if this is a Mermaid diagram
                     if code_language and is_mermaid_diagram(code_text, code_language):
+                        print(f"DEBUG: Processing Mermaid diagram, language={code_language}")
                         # Try to render Mermaid diagram
                         image_data = render_mermaid_diagram(code_text)
+                        print(f"DEBUG: render_mermaid_diagram returned: {type(image_data)}, size={len(image_data) if image_data else 0}")
                         if image_data:
                             try:
                                 # Add image to PDF with proper aspect ratio
@@ -1121,13 +1177,18 @@ def markdown_to_pdf_bytes_reportlab(markdown_text: str, extra_css: Optional[str]
                                 pil_img = PILImage.open(io.BytesIO(image_data))
                                 orig_width, orig_height = pil_img.size
 
-                                # Calculate dimensions to fit within page width while maintaining aspect ratio
-                                max_width = 450  # Max width in points (about 6.25 inches)
+                                # Calculate dimensions to fit within page while maintaining aspect ratio
+                                max_width = 600  # Increased max width for higher resolution images
+                                max_height = 800  # Increased max height for higher resolution images
                                 aspect_ratio = orig_height / orig_width
 
-                                # Scale to fit max width
-                                new_width = min(max_width, orig_width)
-                                new_height = new_width * aspect_ratio
+                                # Scale to fit within both max width and max height, but allow upscaling for small images
+                                width_scale = max_width / orig_width
+                                height_scale = max_height / orig_height
+                                scale = min(width_scale, height_scale)  # Allow upscaling for better text readability
+                                
+                                new_width = orig_width * scale
+                                new_height = orig_height * scale
 
                                 img_buffer.seek(0)  # Reset buffer position
                                 img = RLImage(img_buffer, width=new_width, height=new_height)
@@ -1505,9 +1566,77 @@ def markdown_to_docx_bytes(markdown_text: str, extra_css: Optional[str] = None) 
         in_table = False
         table_lines = []
         in_list = False
+        in_code_block = False
+        code_lines = []
+        code_language = ""
         
         for line in lines:
             stripped = line.strip()
+            
+            # Handle code blocks
+            if stripped.startswith('```'):
+                if in_code_block:
+                    # End of code block
+                    if code_lines:
+                        code_text = '\n'.join(code_lines)
+                        
+                        # Check if this is a Mermaid diagram
+                        if code_language and is_mermaid_diagram(code_text, code_language):
+                            # Try to render Mermaid diagram
+                            image_data = render_mermaid_diagram(code_text)
+                            if image_data:
+                                try:
+                                    # Add image to DOCX
+                                    from docx.shared import Inches
+                                    from PIL import Image as PILImage
+                                    
+                                    # Save image to temporary file
+                                    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_img:
+                                        tmp_img.write(image_data)
+                                        tmp_img_path = tmp_img.name
+                                    
+                                    # Get image dimensions
+                                    pil_img = PILImage.open(tmp_img_path)
+                                    orig_width, orig_height = pil_img.size
+                                    
+                                    # Calculate dimensions to fit within page (max 8 inches wide for higher resolution)
+                                    max_width_inches = 8.0
+                                    aspect_ratio = orig_height / orig_width
+                                    new_width_inches = min(max_width_inches, orig_width / 150)  # Better conversion for high-res images
+                                    new_height_inches = new_width_inches * aspect_ratio
+                                    
+                                    # Add image to document
+                                    doc.add_picture(tmp_img_path, width=Inches(new_width_inches))
+                                    
+                                    # Clean up
+                                    os.unlink(tmp_img_path)
+                                except Exception as e:
+                                    print(f"Error adding Mermaid image to DOCX: {e}")
+                                    # Fallback to placeholder text
+                                    placeholder = create_mermaid_placeholder(code_text)
+                                    doc.add_paragraph(placeholder)
+                            else:
+                                # Fallback to placeholder text
+                                placeholder = create_mermaid_placeholder(code_text)
+                                doc.add_paragraph(placeholder)
+                        else:
+                            # Regular code block - add as monospace text
+                            code_para = doc.add_paragraph()
+                            code_run = code_para.add_run(code_text)
+                            code_run.font.name = 'Courier New'
+                            code_run.font.size = Pt(9)
+                    code_lines = []
+                    code_language = ""
+                    in_code_block = False
+                else:
+                    # Start of code block
+                    code_language = stripped[3:].strip()
+                    in_code_block = True
+                continue
+            
+            if in_code_block:
+                code_lines.append(line)
+                continue
             
             # Handle empty lines
             if not stripped:
@@ -1589,6 +1718,43 @@ def markdown_to_docx_bytes(markdown_text: str, extra_css: Optional[str] = None) 
                 para = doc.add_paragraph(stripped)
                 _apply_inline_formatting(para)
         
+        # Handle any remaining code block
+        if in_code_block and code_lines:
+            code_text = '\n'.join(code_lines)
+            if code_language and is_mermaid_diagram(code_text, code_language):
+                # Handle Mermaid diagram
+                image_data = render_mermaid_diagram(code_text)
+                if image_data:
+                    try:
+                        from docx.shared import Inches
+                        from PIL import Image as PILImage
+                        
+                        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_img:
+                            tmp_img.write(image_data)
+                            tmp_img_path = tmp_img.name
+                        
+                        pil_img = PILImage.open(tmp_img_path)
+                        orig_width, orig_height = pil_img.size
+                        max_width_inches = 8.0
+                        aspect_ratio = orig_height / orig_width
+                        new_width_inches = min(max_width_inches, orig_width / 150)  # Better conversion for high-res images
+                        
+                        doc.add_picture(tmp_img_path, width=Inches(new_width_inches))
+                        os.unlink(tmp_img_path)
+                    except Exception as e:
+                        print(f"Error adding final Mermaid image: {e}")
+                        placeholder = create_mermaid_placeholder(code_text)
+                        doc.add_paragraph(placeholder)
+                else:
+                    placeholder = create_mermaid_placeholder(code_text)
+                    doc.add_paragraph(placeholder)
+            else:
+                # Regular code block
+                code_para = doc.add_paragraph()
+                code_run = code_para.add_run(code_text)
+                code_run.font.name = 'Courier New'
+                code_run.font.size = Pt(9)
+
         # Handle any remaining table
         if in_table and len(table_lines) >= 2:
             _add_table_to_doc(doc, table_lines)
@@ -1812,6 +1978,11 @@ async def render_pdf_raw(request: Request):
         # Validate required fields
         if not markdown:
             raise HTTPException(status_code=400, detail="markdown field is required")
+        
+        # Sanitize filename
+        filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '', str(filename)).strip()
+        if not filename:
+            filename = "document"
         
         # Generate PDF
         pdf_bytes = markdown_to_pdf_bytes(markdown, extra_css=css)
